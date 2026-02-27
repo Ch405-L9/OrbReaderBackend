@@ -3,7 +3,9 @@ const multer    = require("multer");
 const fs        = require("fs");
 const path      = require("path");
 const pdfParse  = require("pdf-parse");
-const Epub      = require("epub2");
+
+// epub2 usage per docs: const EPub = require("epub2").EPub;
+const EPub      = require("epub2").EPub;
 
 const app  = express();
 const port = process.env.PORT || 3000;
@@ -29,10 +31,16 @@ function stripHtml(html) {
     .trim();
 }
 
-// Helper: extract text from EPUB using epub2 callback API
+// Helper: extract text from EPUB using epub2
 function extractEpubText(filePath) {
   return new Promise((resolve, reject) => {
-    const epub = new Epub(filePath);
+    let epub;
+    try {
+      // imageWebRoot, chapterWebRoot can be null for our use case
+      epub = new EPub(filePath, null, null);
+    } catch (e) {
+      return reject(e);
+    }
 
     epub.on("error", err => reject(err));
 
