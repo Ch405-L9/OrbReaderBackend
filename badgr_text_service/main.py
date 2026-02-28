@@ -1,37 +1,66 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import PlainTextResponse
+import os
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from tempfile import NamedTemporaryFile
-import shutil
 
 from converter import convert
 
 app = FastAPI(title="BADGR Text Conversion Service")
 
-@app.post("/convert", response_class=PlainTextResponse)
+MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
+ALLOWED_EXTENSIONS = {"pdf", "epub", "mobi", "azw3", "docx", "csv", "txt"}
+
+
+def count_words(text: str) -> int:
+    return len(text.split())
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/convert")
 async def convert_endpoint(
     file: UploadFile = File(...),
     ocr_fallback: bool = Form(False),
 ):
-    try:
-        suffix = "." + file.filename.split(".")[-1] if "." in file.filename else ""
-        with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = tmp.name
-    except Exception:
-        raise HTTPException(status_code=400, detail="Failed to save uploaded file")
+    content = await file.read()
 
+    if len(content) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large. Maximum is 20 MB.")
+
+    filename = file.filename or "upload.bin"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext}")
+
+    tmp_path = None
     try:
+        with NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
         text = convert(tmp_path, use_ocr=ocr_fallback)
+
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
-    except Exception:
-        raise HTTPException(status_code=500, detail="Conversion failed")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
     finally:
-        try:
-            import os
-            if tmp_path and os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-    return text
+    if not text or not text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="No text could be extracted from this file."
+        )
+
+    return JSONResponse(content={
+        "text": text,
+        "wordCount": count_words(text),
+        "fileType": ext,
+        "error": None,
+    })

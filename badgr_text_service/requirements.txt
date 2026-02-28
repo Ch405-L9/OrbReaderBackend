@@ -3,3 +3,6 @@ uvicorn[standard]
 pymupdf
 pdfplumber
 python-docx
+ebooklib
+beautifulsoup4
+lxml

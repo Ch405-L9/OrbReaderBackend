@@ -1,3 +1,0 @@
-pymupdf
-pdfplumber
-python-docx
