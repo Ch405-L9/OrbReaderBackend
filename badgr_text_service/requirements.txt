@@ -6,3 +6,4 @@ python-docx
 ebooklib
 beautifulsoup4
 lxml
+python-multipart
