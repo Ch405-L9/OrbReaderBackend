@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: badgr-text-service
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
