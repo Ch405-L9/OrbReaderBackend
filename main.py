@@ -1,7 +1,11 @@
 import os
+import re
 import base64
+from collections import Counter
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from tempfile import NamedTemporaryFile
 
 from converter import convert
@@ -15,13 +19,68 @@ DOCUMENT_EXTENSIONS = {"pdf", "epub", "mobi", "azw3", "docx", "csv", "txt"}
 IMAGE_EXTENSIONS     = {"png", "jpg", "jpeg", "webp"}
 
 
+_STOP_WORDS = {
+    'the','a','an','is','it','in','on','at','to','for','of','and','or','but',
+    'with','as','by','from','that','this','was','are','were','be','been','has',
+    'have','had','he','she','they','we','i','you','his','her','their','its',
+    'not','so','do','did','if','up','out','about','than','then','there','what',
+    'which','who','whom','when','where','how','all','each','both','more','also',
+    'been','could','would','should','will','can','may','might','just','one','two',
+}
+
+MAX_SUMMARIZE_WORDS = 4000
+
+
 def count_words(text: str) -> int:
     return len(text.split())
+
+
+def _extractive_summary(text: str, max_sentences: int = 6) -> tuple[str, list[str]]:
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if len(s.split()) >= 6]
+    if not sentences:
+        return text[:500], []
+    if len(sentences) <= max_sentences:
+        return " ".join(sentences), sentences[:3]
+
+    words = re.findall(r'\b[a-z]+\b', text.lower())
+    freq = Counter(w for w in words if w not in _STOP_WORDS)
+
+    def score(sent: str) -> float:
+        sw = re.findall(r'\b[a-z]+\b', sent.lower())
+        return sum(freq.get(w, 0) for w in sw) / max(len(sw), 1)
+
+    scored = sorted(enumerate(sentences), key=lambda x: score(x[1]), reverse=True)
+    top_idx = sorted(i for i, _ in scored[:max_sentences])
+    top = [sentences[i] for i in top_idx]
+    key_points = [sentences[i] for i in sorted(i for i, _ in scored[:3])]
+    return " ".join(top), key_points
+
+
+class SummarizeRequest(BaseModel):
+    text: str
+    max_sentences: int = 6
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/summarize")
+async def summarize_endpoint(req: SummarizeRequest):
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required.")
+    words = text.split()
+    if len(words) > MAX_SUMMARIZE_WORDS:
+        text = " ".join(words[:MAX_SUMMARIZE_WORDS])
+    summary, key_points = _extractive_summary(text, max_sentences=req.max_sentences)
+    return JSONResponse(content={
+        "summary": summary,
+        "keyPoints": key_points,
+        "wordCount": len(words),
+    })
 
 
 @app.post("/convert")
