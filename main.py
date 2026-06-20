@@ -1,5 +1,6 @@
 import os
 import re
+import random
 import base64
 from collections import Counter
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -57,9 +58,59 @@ def _extractive_summary(text: str, max_sentences: int = 6) -> tuple[str, list[st
     return " ".join(top), key_points
 
 
+_QUESTION_TEMPLATES = [
+    "Which of the following is stated in the text?",
+    "According to the passage, which statement is true?",
+    "Which of the following appears in the reading?",
+]
+
+MAX_QUIZ_WORDS = 4000
+
+
+def _generate_quiz(text: str, num_questions: int = 3) -> list[dict]:
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s.split()) >= 8]
+    if len(sentences) < num_questions * 4:
+        return []
+
+    def informativeness(sent: str) -> int:
+        score = 0
+        if re.search(r'\b[A-Z][a-z]+\b', sent): score += 2
+        if re.search(r'\b\d+\b', sent):          score += 2
+        if len(sent.split()) > 12:               score += 1
+        return score
+
+    scored = sorted(enumerate(sentences), key=lambda x: informativeness(x[1]), reverse=True)
+    questions = []
+    used: set[int] = set()
+
+    for qi, (idx, correct) in enumerate(scored):
+        if len(questions) >= num_questions:
+            break
+        used.add(idx)
+        distractors = [s for j, s in enumerate(sentences)
+                       if j not in used and abs(j - idx) > 1][:3]
+        if len(distractors) < 3:
+            continue
+        options = [correct[:220]] + [d[:220] for d in distractors]
+        random.shuffle(options)
+        questions.append({
+            "question": _QUESTION_TEMPLATES[qi % len(_QUESTION_TEMPLATES)],
+            "options":  options,
+            "answerIndex": options.index(correct[:220]),
+        })
+        used.update(j for j, s in enumerate(sentences) if s in distractors)
+
+    return questions
+
+
 class SummarizeRequest(BaseModel):
     text: str
     max_sentences: int = 6
+
+
+class QuizRequest(BaseModel):
+    text: str
+    num_questions: int = 3
 
 
 @app.get("/health")
@@ -81,6 +132,20 @@ async def summarize_endpoint(req: SummarizeRequest):
         "keyPoints": key_points,
         "wordCount": len(words),
     })
+
+
+@app.post("/quiz")
+async def quiz_endpoint(req: QuizRequest):
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required.")
+    words = text.split()
+    if len(words) > MAX_QUIZ_WORDS:
+        text = " ".join(words[:MAX_QUIZ_WORDS])
+    questions = _generate_quiz(text, num_questions=min(req.num_questions, 5))
+    if not questions:
+        raise HTTPException(status_code=422, detail="Not enough text to generate quiz questions.")
+    return JSONResponse(content={"questions": questions})
 
 
 @app.post("/convert")
