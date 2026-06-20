@@ -7,3 +7,4 @@ ebooklib
 beautifulsoup4
 lxml
 python-multipart
+anthropic

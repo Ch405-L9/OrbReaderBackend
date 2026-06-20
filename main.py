@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import random
 import base64
 from collections import Counter
@@ -10,6 +11,16 @@ from pydantic import BaseModel
 from tempfile import NamedTemporaryFile
 
 from converter import convert
+
+try:
+    import anthropic as _anthropic_sdk
+    _ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
+    _ai_client = _anthropic_sdk.Anthropic(api_key=_ANTHROPIC_KEY) if _ANTHROPIC_KEY else None
+except ImportError:
+    _ai_client = None
+
+_AI_MODEL   = "claude-haiku-4-5-20251001"
+_AI_ENABLED = _ai_client is not None
 
 app = FastAPI(title="BADGR Text Conversion Service")
 
@@ -103,6 +114,61 @@ def _generate_quiz(text: str, num_questions: int = 3) -> list[dict]:
     return questions
 
 
+def _ai_summarize(text: str) -> tuple[str, list[str]]:
+    """Claude Haiku summary. Returns (summary_str, key_points_list)."""
+    prompt = (
+        "You are a reading comprehension assistant. Summarize the following text in 4-6 clear sentences. "
+        "Then list exactly 3 key points.\n\n"
+        "Respond in this exact JSON format, no other text:\n"
+        '{"summary": "...", "keyPoints": ["...", "...", "..."]}\n\n'
+        f"TEXT:\n{text}"
+    )
+    msg = _ai_client.messages.create(
+        model=_AI_MODEL,
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = msg.content[0].text.strip()
+    # Strip markdown fences if present
+    raw = re.sub(r'^```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw)
+    data = json.loads(raw)
+    return data["summary"], data.get("keyPoints", [])
+
+
+def _ai_quiz(text: str, num_questions: int = 3) -> list[dict]:
+    """Claude Haiku quiz. Returns list of {question, options, answerIndex}."""
+    prompt = (
+        f"You are a reading comprehension tutor. Create exactly {num_questions} multiple-choice questions "
+        "that test deep understanding of the following text — not just surface recall. "
+        "Each question must have exactly 4 options (A-D). Only one is correct.\n\n"
+        "Respond in this exact JSON format, no other text:\n"
+        '{"questions": [{"question": "...", "options": ["...", "...", "...", "..."], "answerIndex": 0}]}\n\n'
+        "answerIndex is 0-based (0=first option is correct, 1=second, etc.).\n\n"
+        f"TEXT:\n{text}"
+    )
+    msg = _ai_client.messages.create(
+        model=_AI_MODEL,
+        max_tokens=1200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = msg.content[0].text.strip()
+    raw = re.sub(r'^```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw)
+    data = json.loads(raw)
+    qs = data.get("questions", [])
+    # Validate structure — drop malformed questions
+    valid = []
+    for q in qs:
+        if (isinstance(q.get("question"), str)
+                and isinstance(q.get("options"), list)
+                and len(q["options"]) == 4
+                and isinstance(q.get("answerIndex"), int)
+                and 0 <= q["answerIndex"] <= 3):
+            valid.append(q)
+    return valid
+
+
 class SummarizeRequest(BaseModel):
     text: str
     max_sentences: int = 6
@@ -126,11 +192,18 @@ async def summarize_endpoint(req: SummarizeRequest):
     words = text.split()
     if len(words) > MAX_SUMMARIZE_WORDS:
         text = " ".join(words[:MAX_SUMMARIZE_WORDS])
-    summary, key_points = _extractive_summary(text, max_sentences=req.max_sentences)
+    try:
+        if _AI_ENABLED:
+            summary, key_points = _ai_summarize(text)
+        else:
+            summary, key_points = _extractive_summary(text, max_sentences=req.max_sentences)
+    except Exception:
+        summary, key_points = _extractive_summary(text, max_sentences=req.max_sentences)
     return JSONResponse(content={
         "summary": summary,
         "keyPoints": key_points,
         "wordCount": len(words),
+        "ai": _AI_ENABLED,
     })
 
 
@@ -142,10 +215,18 @@ async def quiz_endpoint(req: QuizRequest):
     words = text.split()
     if len(words) > MAX_QUIZ_WORDS:
         text = " ".join(words[:MAX_QUIZ_WORDS])
-    questions = _generate_quiz(text, num_questions=min(req.num_questions, 5))
+    n = min(req.num_questions, 5)
+    questions = None
+    try:
+        if _AI_ENABLED:
+            questions = _ai_quiz(text, num_questions=n)
+    except Exception:
+        questions = None
+    if not questions:
+        questions = _generate_quiz(text, num_questions=n)
     if not questions:
         raise HTTPException(status_code=422, detail="Not enough text to generate quiz questions.")
-    return JSONResponse(content={"questions": questions})
+    return JSONResponse(content={"questions": questions, "ai": _AI_ENABLED})
 
 
 @app.post("/convert")
