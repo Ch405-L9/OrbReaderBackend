@@ -26,10 +26,17 @@ _AI_MODEL   = "claude-haiku-4-5-20251001"
 _AI_ENABLED = _ai_client is not None
 
 def _client_ip(request: Request) -> str:
+    # CF-Connecting-IP is injected by Cloudflare and represents the true client IP
+    cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
+    if cf_ip:
+        return cf_ip
+    # Fallback: last XFF hop (Render-appended real client IP, not client-spoofable)
     fwd = request.headers.get("X-Forwarded-For", "")
     parts = [p.strip() for p in fwd.split(",") if p.strip()]
-    # Render appends real client IP; take last to avoid spoofed headers from client
-    return parts[-1] if parts else (request.client.host or "unknown")
+    if parts:
+        return parts[-1]
+    client = request.client
+    return client.host if client else "unknown"
 
 limiter = Limiter(key_func=_client_ip)
 
@@ -194,7 +201,7 @@ class QuizRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "1.1.0", "rate_limiting": True}
 
 
 @app.post("/summarize")
