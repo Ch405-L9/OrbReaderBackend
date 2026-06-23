@@ -8,3 +8,4 @@ beautifulsoup4
 lxml
 python-multipart
 anthropic
+slowapi

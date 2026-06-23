@@ -8,6 +8,9 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from starlette.requests import Request
 from tempfile import NamedTemporaryFile
 
 from converter import convert
@@ -22,7 +25,17 @@ except ImportError:
 _AI_MODEL   = "claude-haiku-4-5-20251001"
 _AI_ENABLED = _ai_client is not None
 
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("X-Forwarded-For", "")
+    parts = [p.strip() for p in fwd.split(",") if p.strip()]
+    # Render appends real client IP; take last to avoid spoofed headers from client
+    return parts[-1] if parts else (request.client.host or "unknown")
+
+limiter = Limiter(key_func=_client_ip)
+
 app = FastAPI(title="BADGR Text Conversion Service")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 MAX_FILE_BYTES  = 100 * 1024 * 1024  # 100 MB — documents (Pro tier uploads)
 MAX_IMAGE_BYTES =   5 * 1024 * 1024  #   5 MB — images
@@ -185,7 +198,8 @@ async def health():
 
 
 @app.post("/summarize")
-async def summarize_endpoint(req: SummarizeRequest):
+@limiter.limit("20/minute")
+async def summarize_endpoint(request: Request, req: SummarizeRequest):
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required.")
@@ -208,7 +222,8 @@ async def summarize_endpoint(req: SummarizeRequest):
 
 
 @app.post("/quiz")
-async def quiz_endpoint(req: QuizRequest):
+@limiter.limit("20/minute")
+async def quiz_endpoint(request: Request, req: QuizRequest):
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required.")
@@ -230,7 +245,9 @@ async def quiz_endpoint(req: QuizRequest):
 
 
 @app.post("/convert")
+@limiter.limit("10/minute")
 async def convert_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     ocr_fallback: bool = Form(False),
 ):
@@ -296,7 +313,9 @@ async def convert_endpoint(
 
 
 @app.post("/upload-image")
+@limiter.limit("30/minute")
 async def upload_image_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     purpose: str = Form("cover"),
 ):
