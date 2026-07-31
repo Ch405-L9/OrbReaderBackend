@@ -25,6 +25,26 @@ except ImportError:
 _AI_MODEL   = "claude-haiku-4-5-20251001"
 _AI_ENABLED = _ai_client is not None
 
+# ── Play Integrity (report-only, fail-open) ──────────────────────────────────
+# Service account JSON is provided as an env var (Render secret), NEVER committed.
+# Decoding is best-effort: any failure returns allow=True so users are never blocked.
+_INTEGRITY_PACKAGE = os.getenv("INTEGRITY_PACKAGE", "com.badgr.orbreader")
+_INTEGRITY_SCOPE   = "https://www.googleapis.com/auth/playintegrity"
+_integrity_creds   = None
+try:
+    import httpx as _httpx
+    from google.oauth2 import service_account as _gsa
+    from google.auth.transport.requests import Request as _GAuthRequest
+    _sa_json = os.getenv("INTEGRITY_SA_JSON")
+    if _sa_json:
+        _integrity_creds = _gsa.Credentials.from_service_account_info(
+            json.loads(_sa_json), scopes=[_INTEGRITY_SCOPE]
+        )
+except Exception:
+    _integrity_creds = None  # deps missing or bad key → stay fail-open
+
+_INTEGRITY_ENABLED = _integrity_creds is not None
+
 def _client_ip(request: Request) -> str:
     # CF-Connecting-IP is injected by Cloudflare and represents the true client IP
     cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
@@ -199,9 +219,48 @@ class QuizRequest(BaseModel):
     num_questions: int = 3
 
 
+class IntegrityRequest(BaseModel):
+    integrityToken: str
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.1.0", "rate_limiting": True}
+    return {"status": "ok", "version": "1.1.0", "rate_limiting": True,
+            "integrity": _INTEGRITY_ENABLED}
+
+
+@app.post("/verify-integrity")
+@limiter.limit("30/minute")
+async def verify_integrity(request: Request, req: IntegrityRequest):
+    """
+    Decodes a Play Integrity token and returns the verdict.
+
+    REPORT-ONLY / FAIL-OPEN: allow is always True in this MVP — the app logs the
+    verdict but enforces nothing. Any decode failure also returns allow=True so a
+    misconfigured backend can never lock users out. Enforcement is a later step and
+    must remain fail-open on optional verdict fields.
+    """
+    if not _INTEGRITY_ENABLED:
+        return {"allow": True, "verdict": None, "reason": "integrity_not_configured"}
+    if not req.integrityToken:
+        return {"allow": True, "verdict": None, "reason": "empty_token"}
+    try:
+        _integrity_creds.refresh(_GAuthRequest())
+        url = (f"https://playintegrity.googleapis.com/v1/"
+               f"{_INTEGRITY_PACKAGE}:decodeIntegrityToken")
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {_integrity_creds.token}"},
+                json={"integrity_token": req.integrityToken},
+            )
+        if r.status_code != 200:
+            return {"allow": True, "verdict": None,
+                    "reason": f"decode_http_{r.status_code}"}
+        payload = r.json().get("tokenPayloadExternal")
+        return {"allow": True, "verdict": payload, "reason": "ok"}
+    except Exception:
+        return {"allow": True, "verdict": None, "reason": "decode_error"}
 
 
 @app.post("/summarize")

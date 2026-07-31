@@ -9,3 +9,5 @@ lxml
 python-multipart
 anthropic
 slowapi
+httpx
+google-auth
