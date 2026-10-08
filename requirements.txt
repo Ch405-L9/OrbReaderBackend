@@ -11,3 +11,4 @@ anthropic
 slowapi
 httpx
 google-auth
+requests
